@@ -90,6 +90,49 @@ class MatchingTests(unittest.TestCase):
         self.assertTrue(settings.matches(msg("Сбербанк")))
         self.assertFalse(settings.matches(msg("Другой банк")))
 
+    def test_bank_and_bin_are_both_required_in_one_message(self):
+        settings = Settings("Bancorp(514377)", "Забрать", 0, 0)
+        for text in ("BANCORP\n/bin 514377", "BIN: 514377, банк Bancorp", "Bancorp (514377)"):
+            with self.subTest(text=text):
+                self.assertTrue(settings.matches(msg(text)))
+        for text in ("Bancorp", "/bin 514377", "Bancorp /bin 514378", "Другой банк /bin 514377"):
+            with self.subTest(text=text):
+                self.assertFalse(settings.matches(msg(text)))
+        self.assertFalse(settings.matches(msg("Bancorp", buttons=("514377", "Забрать"))))
+
+    def test_plain_banks_still_work_without_bin_in_a_mixed_list(self):
+        settings = Settings("Bancorp(514377), Сбер, Альфа", "Забрать", 0, 0)
+        self.assertTrue(settings.matches(msg("Сбер")))
+        self.assertTrue(settings.matches(msg("Альфа")))
+        self.assertTrue(settings.matches(msg("Bancorp /bin 514377")))
+        self.assertFalse(settings.matches(msg("Bancorp /bin 514378")))
+        self.assertFalse(settings.matches(msg("Bancorp")))
+
+    def test_bin_is_not_a_prefix_or_part_of_a_longer_number(self):
+        for whole_word in (True, False):
+            settings = Settings("Bancorp(514377)", "Забрать", 0, 0, whole_word)
+            for number in ("5143770", "1514377", "15143770"):
+                with self.subTest(whole_word=whole_word, number=number):
+                    self.assertFalse(settings.matches(msg(f"Bancorp /bin {number}")))
+
+    def test_multiple_bin_rules_remain_separate_conditions(self):
+        settings = Settings("Bancorp(514377), Другой банк(123456)", "Забрать", 0, 0)
+        self.assertTrue(settings.matches(msg("Другой банк /bin 123456")))
+        self.assertFalse(settings.matches(msg("Bancorp /bin 123456")))
+        self.assertFalse(settings.matches(msg("Другой банк /bin 514377")))
+
+    def test_bin_condition_spaces_and_name_matching_mode(self):
+        settings = Settings(" Bancorp ( 514377 ), Сбер ", "Забрать", 0, 0)
+        self.assertTrue(settings.matches(msg("bancorp: /bin 514377")))
+        self.assertFalse(settings.matches(msg("BancorpX /bin 514377")))
+        self.assertTrue(Settings("Bancorp(514377)", "Забрать", 0, 0, False).matches(msg("BancorpX /bin 514377")))
+
+    def test_malformed_bin_conditions_are_rejected(self):
+        for value in ("Bancorp()", "(514377)", "Bancorp(51O377)", "Bancorp(514377", "Bancorp514377)",
+                      "Bancorp(514377,123456)"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Settings(value, "Забрать", 0, 0)
+
 
 class SchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -177,6 +220,15 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
         self.clicker.observe(latest)
         await self.finish()
         self.assertEqual(self.adapter.clicked, [((123, 1), "Забрать")])
+
+    async def test_bin_is_rechecked_before_a_scheduled_click(self):
+        self.clicker.settings = Settings("Bancorp(514377)", "Забрать", 2, 5)
+        matching = msg("Bancorp /bin 514377")
+        self.clicker.observe(matching)
+        self.adapter.message = msg("Bancorp /bin 514378")
+        await self.finish()
+        self.assertEqual(self.adapter.clicked, [])
+        self.assertEqual(self.store.keys, set())
 
     async def test_messages_for_different_terms_each_click_once(self):
         messages = [msg("BANCORP", message_id=10), msg("Сбер", message_id=11), msg("Другое", message_id=12)]

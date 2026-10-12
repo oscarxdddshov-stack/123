@@ -182,6 +182,29 @@ class RepeatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, 3)
         self.assertEqual(self.store.outcomes[original().key], "mine")
 
+    async def test_retries_do_not_click_after_required_bin_changes(self):
+        adapter = RepeatAdapter(["Пока не готово"])
+        initial = Message(123, 1, "Bancorp /bin 514377", ("Забрать",), 77)
+        adapter.messages[initial.key] = initial
+        calls = 0
+
+        async def sleep(delay):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                adapter.messages[initial.key] = Message(123, 1, "Bancorp /bin 514378", ("Забрать",), 77)
+            elif calls == 3:
+                adapter.messages[initial.key] = Message(123, 1, "Уже получил другой", (), 77)
+            await asyncio.sleep(0)
+
+        clicker = Clicker(repeat_settings(word="Bancorp(514377)"), adapter, self.store, self.logs.append,
+                          sleep=sleep, uniform=lambda low, high: 2)
+        self.clickers.append(clicker)
+        clicker.observe(initial)
+        await self.finish(clicker)
+        self.assertEqual(adapter.clicks, [initial.key])
+        self.assertEqual(self.store.outcomes[initial.key], "other")
+
     async def test_reply_must_refer_to_this_message_chat_and_sender(self):
         gate = asyncio.Event()
 

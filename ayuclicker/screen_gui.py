@@ -182,7 +182,7 @@ class ScreenApp:
         matching.grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 10))
         checkbox = ttk.Checkbutton(matching, text="Искать целые слова / фразы", variable=self.whole_word)
         checkbox.pack(anchor="w")
-        ttk.Label(matching, text="Через запятую — любое из слов: BANCORP, Сбер, Альфа", wraplength=480).pack(anchor="w")
+        ttk.Label(matching, text="Пример: Bancorp(514377), Сбер, Альфа. Скобки — обязательный BIN.", wraplength=480).pack(anchor="w")
         self.inputs.append(checkbox)
 
         ttk.Label(frame, text="Задержка, сек.").grid(row=5, column=0, sticky="w")

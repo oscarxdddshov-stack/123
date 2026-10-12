@@ -126,6 +126,14 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             await adapter.click(Message(42, 12, "подарок", ("Забрать",)), "Забрать")
         self.assertEqual(error.exception.reason, "TimeoutError")
 
+    async def test_adapter_rechecks_required_bin_before_sending_callback(self):
+        client = AsyncMock()
+        client.get_messages.return_value = raw_message(text="Bancorp /bin 514378")
+        adapter = TelegramAdapter(client, {42: "entity"}, Settings("Bancorp(514377)", "Забрать", 1, 2))
+        with self.assertRaises(ConfigurationError):
+            await adapter.click(Message(42, 12, "Bancorp /bin 514377", ("Забрать",)), "Забрать")
+        client.assert_not_awaited()
+
 
 class FakeClient:
     def __init__(self):

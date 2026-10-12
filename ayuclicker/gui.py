@@ -156,7 +156,7 @@ class App:
         matching.grid(row=11, column=1, columnspan=2, sticky="w", pady=(0, 8))
         whole_box = ttk.Checkbutton(matching, text="Искать целые слова / фразы", variable=self.whole_word)
         whole_box.pack(anchor="w")
-        ttk.Label(matching, text="Через запятую — любое из слов: BANCORP, Сбер, Альфа", wraplength=490).pack(anchor="w")
+        ttk.Label(matching, text="Пример: Bancorp(514377), Сбер, Альфа. Скобки — обязательный BIN.", wraplength=490).pack(anchor="w")
         self.inputs.append(whole_box)
 
         ttk.Label(frame, text="Задержка, сек.").grid(row=12, column=0, sticky="w", padx=(0, 12))

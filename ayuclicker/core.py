@@ -11,6 +11,37 @@ from typing import Awaitable, Callable, Protocol
 
 
 @dataclass(frozen=True)
+class TextRule:
+    name: str
+    bin_number: str | None = None
+
+    @classmethod
+    def parse(cls, term: str) -> TextRule:
+        if "(" not in term and ")" not in term:
+            return cls(term)
+        match = re.fullmatch(r"([^()]+?)\s*\(\s*([0-9]+)\s*\)", term)
+        if match is None or not match.group(1).strip():
+            raise ValueError(
+                "Условие с BIN должно иметь формат Название(цифры), например Bancorp(514377). "
+                "Для названия без BIN не используйте скобки."
+            )
+        return cls(match.group(1).strip(), match.group(2))
+
+    def matches(self, text: str, whole_word: bool) -> bool:
+        if whole_word:
+            name_matches = re.search(r"(?<!\w)" + re.escape(self.name) + r"(?!\w)", text, re.IGNORECASE) is not None
+        else:
+            name_matches = self.name.casefold() in text.casefold()
+        if not name_matches:
+            return False
+        if self.bin_number is None:
+            return True
+        # Match the complete digit sequence even when substring mode is enabled.
+        # /bin is an optional label; title and BIN must belong to this message.
+        return re.search(r"(?<!\d)" + re.escape(self.bin_number) + r"(?!\d)", text) is not None
+
+
+@dataclass(frozen=True)
 class Settings:
     word: str
     button: str
@@ -21,6 +52,7 @@ class Settings:
     mine_phrases: str = ""
     other_phrases: str = ""
     terms: tuple[str, ...] = field(init=False, repr=False)
+    rules: tuple[TextRule, ...] = field(init=False, repr=False)
     mine_markers: tuple[str, ...] = field(init=False, repr=False)
     other_markers: tuple[str, ...] = field(init=False, repr=False)
 
@@ -29,6 +61,7 @@ class Settings:
         if not terms or not self.button.strip():
             raise ValueError("Укажите хотя бы одно слово / фразу и название кнопки.")
         object.__setattr__(self, "terms", terms)
+        object.__setattr__(self, "rules", tuple(TextRule.parse(term) for term in terms))
         for name, source in (("mine_markers", self.mine_phrases), ("other_markers", self.other_phrases)):
             markers = tuple(" ".join(item.split()).casefold() for item in re.split(r"[;\r\n]+", source) if item.strip())
             object.__setattr__(self, name, markers)
@@ -53,13 +86,7 @@ class Settings:
         return None
 
     def matches(self, message: Message) -> bool:
-        if self.whole_word:
-            alternatives = "|".join(re.escape(term) for term in self.terms)
-            pattern = r"(?<!\w)(?:" + alternatives + r")(?!\w)"
-            contains_word = re.search(pattern, message.text, re.IGNORECASE) is not None
-        else:
-            text = message.text.casefold()
-            contains_word = any(term.casefold() in text for term in self.terms)
+        contains_word = any(rule.matches(message.text, self.whole_word) for rule in self.rules)
         return contains_word and self.button.strip().casefold() in (
             label.strip().casefold() for label in message.buttons
         )
