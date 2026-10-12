@@ -7,6 +7,7 @@ from ayuclicker.core import Clicker, Message, Settings
 class MemoryStore:
     def __init__(self):
         self.keys = set()
+        self.outcomes = {}
 
     def contains(self, key):
         return key in self.keys
@@ -16,6 +17,9 @@ class MemoryStore:
             return False
         self.keys.add(key)
         return True
+
+    def complete(self, key, outcome):
+        self.outcomes[key] = outcome
 
 
 class FakeAdapter:

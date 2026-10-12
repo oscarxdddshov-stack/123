@@ -3,11 +3,12 @@
 import asyncio
 from pathlib import Path
 import re
+import time
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient, errors, events, functions, types, utils
 
-from .core import Clicker, Message, Settings
+from .core import Clicker, ClickResponse, Message, RetryLater, Settings, message_label
 from .storage import SqliteAttempts
 
 
@@ -56,7 +57,11 @@ def project_message(raw) -> Message:
         for button in row
         if is_callback(button)
     )
-    return Message(raw.chat_id, raw.id, raw.raw_text or "", buttons)
+    reply_to_id = getattr(raw, "reply_to_msg_id", None)
+    reply_peer = getattr(getattr(raw, "reply_to", None), "reply_to_peer_id", None)
+    if reply_peer is not None and utils.get_peer_id(reply_peer) != raw.chat_id:
+        reply_to_id = None
+    return Message(raw.chat_id, raw.id, raw.raw_text or "", buttons, getattr(raw, "sender_id", None), reply_to_id)
 
 
 def parse_chat(value: str) -> int | str:
@@ -100,6 +105,21 @@ class TelegramAdapter:
         self.client = client
         self.entities = dict(entities)
         self.settings = settings
+        self.pause_until = 0.0
+
+    async def request(self, operation):
+        remaining = self.pause_until - time.monotonic()
+        if remaining > 0:
+            raise RetryLater("Telegram ограничил частоту запросов", remaining)
+        try:
+            return await operation()
+        except (errors.FloodWaitError, errors.SlowModeWaitError, errors.FloodPremiumWaitError) as error:
+            seconds = max(1, error.seconds)
+            self.pause_until = max(self.pause_until, time.monotonic() + seconds)
+            raise RetryLater(type(error).__name__, seconds) from error
+        except (TimeoutError, OSError, errors.BotResponseTimeoutError, errors.ServerError,
+                errors.RpcCallFailError, errors.TimedOutError) as error:
+            raise RetryLater(type(error).__name__) from error
 
     def entity_for(self, chat_id):
         try:
@@ -108,7 +128,8 @@ class TelegramAdapter:
             raise ConfigurationError("Этот чат не включён в список наблюдения.") from error
 
     async def fetch(self, key: tuple[int, int]) -> Message | None:
-        raw = await self.client.get_messages(self.entity_for(key[0]), ids=key[1])
+        entity = self.entity_for(key[0])
+        raw = await self.request(lambda: self.client.get_messages(entity, ids=key[1]))
         if raw is None or isinstance(raw, types.MessageEmpty):
             return None
         message = project_message(raw)
@@ -116,24 +137,33 @@ class TelegramAdapter:
             raise ConfigurationError("Получено сообщение из другого чата. Нажатие отменено.")
         return message
 
-    async def click(self, message: Message, title: str) -> None:
+    async def click(self, message: Message, title: str) -> ClickResponse:
         # Fetch again before sending the exact callback data, not coordinates.
         entity = self.entity_for(message.chat_id)
-        raw = await self.client.get_messages(entity, ids=message.message_id)
-        if raw is None or isinstance(raw, types.MessageEmpty) or not self.settings.matches(project_message(raw)):
+        raw = await self.request(lambda: self.client.get_messages(entity, ids=message.message_id))
+        if raw is None or isinstance(raw, types.MessageEmpty):
+            if self.settings.repeat_until_result:
+                return ClickResponse(dispatched=False)
             raise ConfigurationError("Сообщение изменилось перед нажатием.")
-        if project_message(raw).key != message.key:
+        latest = project_message(raw)
+        if latest.key != message.key:
             raise ConfigurationError("Получено сообщение из другого чата. Нажатие отменено.")
+        if self.settings.repeat_until_result and self.settings.outcome(latest.text):
+            return ClickResponse(latest.text, dispatched=False)
+        if not self.settings.matches(latest):
+            if self.settings.repeat_until_result:
+                return ClickResponse(dispatched=False)
+            raise ConfigurationError("Сообщение изменилось перед нажатием.")
         for row in raw.buttons or []:
             for button in row:
                 if (
                     is_callback(button)
                     and button.text.strip().casefold() == title.casefold()
                 ):
-                    await self.client(functions.messages.GetBotCallbackAnswerRequest(
+                    response = await self.request(lambda: self.client(functions.messages.GetBotCallbackAnswerRequest(
                         peer=entity, msg_id=raw.id, data=button.button.type.data,
-                    ))
-                    return
+                    )))
+                    return ClickResponse(response.message or "")
         raise ConfigurationError("Кнопка больше недоступна.")
 
 
@@ -180,6 +210,7 @@ async def run_session(
         str(directory / "telegram"), api_id, api_hash,
         device_model="AyuClicker", app_version="1.0",
         request_retries=0, flood_sleep_threshold=0,
+        raise_last_call_error=True,
         connection_retries=3, retry_delay=1, timeout=10,
     )
     attempts = None
@@ -235,14 +266,20 @@ async def run_session(
             # Ignore history, including edits of messages predating this run.
             chat_id = event.message.chat_id
             if chat_id in baselines and event.message.id > baselines[chat_id]:
-                clicker.observe(project_message(event.message))
+                message = project_message(event.message)
+                clicker.observe_reply(message)
+                clicker.observe(message)
 
         async def deleted(event):
             # Private-chat deletions sometimes have no chat ID. Refetch remains
             # the authoritative check; do not cancel another chat's message.
             if event.chat_id in entities:
                 for message_id in event.deleted_ids:
-                    clicker.remove((event.chat_id, message_id))
+                    key = (event.chat_id, message_id)
+                    if settings.repeat_until_result and key in clicker.pending and attempts.contains(key):
+                        log(f"{message_label(key)}: удалено; результат не подтверждён, ожидаем ответ бота.")
+                    else:
+                        clicker.remove(key)
 
         selected = list(entities.values())
         client.add_event_handler(observe, events.NewMessage(chats=selected, incoming=True))

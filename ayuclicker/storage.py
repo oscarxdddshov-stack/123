@@ -42,6 +42,10 @@ class SqliteAttempts:
             "PRIMARY KEY (account, chat, message))"
         )
         self.connection.commit()
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(attempts)")}
+        if "outcome" not in columns:
+            self.connection.execute("ALTER TABLE attempts ADD COLUMN outcome TEXT NOT NULL DEFAULT 'legacy_once'")
+            self.connection.commit()
         path.chmod(0o600)
 
     def contains(self, key: tuple[int, int]) -> bool:
@@ -53,10 +57,19 @@ class SqliteAttempts:
     def claim(self, key: tuple[int, int]) -> bool:
         with self.connection:
             cursor = self.connection.execute(
-                "INSERT OR IGNORE INTO attempts (account, chat, message) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO attempts (account, chat, message, outcome) VALUES (?, ?, ?, 'in_progress')",
                 (self.account_id, *key),
             )
         return cursor.rowcount == 1
+
+    def complete(self, key: tuple[int, int], outcome: str) -> None:
+        if outcome not in ("mine", "other", "single_attempt"):
+            raise ValueError("Unknown attempt outcome")
+        with self.connection:
+            self.connection.execute(
+                "UPDATE attempts SET outcome=? WHERE account=? AND chat=? AND message=?",
+                (outcome, self.account_id, *key),
+            )
 
     def close(self) -> None:
         self.connection.close()

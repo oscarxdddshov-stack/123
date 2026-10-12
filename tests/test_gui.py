@@ -160,3 +160,30 @@ class GuiTests(unittest.TestCase):
         self.app.emit("watching", 2)
         self.app.poll()
         self.assertEqual(self.app.status.get(), "Работает: чатов 2")
+
+    def test_result_configuration_enables_repeat_and_is_passed_to_worker(self):
+        with patch("ayuclicker.gui.ResultDialog") as dialog:
+            dialog.return_value.result = ("Получено вами", "Уже получил другой")
+            self.app.configure_results()
+        self.assertTrue(self.app.repeat_until_result.get())
+        for name, value in {"api_id": "123", "api_hash": "a" * 32, "chat": "42",
+                            "word": "подарок", "button": "Забрать"}.items():
+            self.app.variables[name].set(value)
+        with patch("ayuclicker.gui.Worker") as constructor:
+            self.app.start()
+            settings = constructor.call_args.args[-1]
+            self.assertTrue(settings.repeat_until_result)
+            self.assertEqual(settings.outcome("Получено вами"), "mine")
+        config = load_config(Path(self.temporary.name))
+        self.assertTrue(config["repeat_until_result"])
+        self.assertEqual(config["other_phrases"], "Уже получил другой")
+
+    def test_repeat_without_confirmation_phrases_cannot_start(self):
+        self.app.repeat_until_result.set(True)
+        for name, value in {"api_id": "123", "api_hash": "a" * 32, "chat": "42",
+                            "word": "подарок", "button": "Забрать"}.items():
+            self.app.variables[name].set(value)
+        with patch("ayuclicker.gui.Worker") as constructor, patch("ayuclicker.gui.messagebox.showerror") as error:
+            self.app.start()
+            constructor.assert_not_called()
+            self.assertIn("Забрал я", error.call_args.args[1])

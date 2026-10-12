@@ -12,6 +12,7 @@ import webbrowser
 
 from .core import Settings
 from .editing import LoginDialog, install_editing, paste_from_clipboard
+from .result_dialog import ResultDialog
 from .storage import data_directory, load_config, save_config
 from .telegram import ConfigurationError, UserCancelled, explain_error, parse_chats, run_session
 
@@ -90,6 +91,9 @@ class App:
         self.variables = {}
         self.entries = {}
         self.paste_buttons = {}
+        self.variables["mine_phrases"] = tk.StringVar(value=str(self.config.get("mine_phrases", "")))
+        self.variables["other_phrases"] = tk.StringVar(value=str(self.config.get("other_phrases", "")))
+        self.repeat_until_result = tk.BooleanVar(value=bool(self.config.get("repeat_until_result", False)))
         root.title("AyuClicker — кнопки по условию")
         root.geometry("780x740")
         root.minsize(700, 680)
@@ -167,8 +171,16 @@ class App:
             entry.pack(side="left", padx=(0, 14))
             self.inputs.append(entry)
 
+        retry_controls = ttk.Frame(frame)
+        retry_controls.grid(row=13, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        retry_checkbox = ttk.Checkbutton(retry_controls, text="Повторять до подтверждения результата", variable=self.repeat_until_result)
+        retry_checkbox.pack(side="left")
+        retry_button = ttk.Button(retry_controls, text="Признаки результата…", command=self.configure_results)
+        retry_button.pack(side="left", padx=10)
+        self.inputs.extend((retry_checkbox, retry_button))
+
         controls = ttk.Frame(frame)
-        controls.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(14, 10))
+        controls.grid(row=14, column=0, columnspan=3, sticky="ew", pady=(14, 10))
         self.start_button = ttk.Button(controls, text="Старт", command=self.start)
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(controls, text="Стоп", command=self.stop, state="disabled")
@@ -176,10 +188,10 @@ class App:
         self.status = tk.StringVar(value="Остановлено")
         ttk.Label(controls, textvariable=self.status).pack(side="right")
 
-        ttk.Label(frame, text="Журнал действий").grid(row=14, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="Журнал действий").grid(row=15, column=0, columnspan=3, sticky="w")
         log_frame = ttk.Frame(frame)
-        log_frame.grid(row=15, column=0, columnspan=3, sticky="nsew", pady=(5, 0))
-        frame.rowconfigure(15, weight=1)
+        log_frame.grid(row=16, column=0, columnspan=3, sticky="nsew", pady=(5, 0))
+        frame.rowconfigure(16, weight=1)
         self.log_widget = tk.Text(log_frame, height=8, state="disabled", wrap="word", font=("Consolas", 10))
         self.log_widget.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_widget.yview)
@@ -204,6 +216,13 @@ class App:
 
     def emit(self, *event):
         self.events.put(event)
+
+    def configure_results(self):
+        dialog = ResultDialog(self.root, self.variables["mine_phrases"].get(), self.variables["other_phrases"].get())
+        if dialog.result is not None:
+            self.variables["mine_phrases"].set(dialog.result[0])
+            self.variables["other_phrases"].set(dialog.result[1])
+            self.repeat_until_result.set(True)
 
     def _chat_modified(self, event=None):
         if self.chat_text.edit_modified():
@@ -282,9 +301,12 @@ class App:
                     high = float(values["maximum"].replace(",", "."))
                 except ValueError as error:
                     raise ValueError("Задержки нужно указать числами в секундах.") from error
-                settings = Settings(values["word"], values["button"], low, high, self.whole_word.get())
+                settings = Settings(values["word"], values["button"], low, high, self.whole_word.get(),
+                                    repeat_until_result=self.repeat_until_result.get(),
+                                    mine_phrases=values["mine_phrases"], other_phrases=values["other_phrases"])
             config = {
                 **values, "chat": chat, "whole_word": self.whole_word.get(),
+                "repeat_until_result": self.repeat_until_result.get(),
                 "remember_hash": self.remember.get(),
                 "api_hash": values["api_hash"] if self.remember.get() else "",
             }

@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from telethon import Button, events, functions, types
+from telethon import Button, errors, events, functions, types
 
-from ayuclicker.core import Clicker, Message, Settings
+from ayuclicker.core import Clicker, Message, RetryLater, Settings
 from ayuclicker.telegram import (
     ConfigurationError, TelegramAdapter, parse_chat, parse_chats, project_message, run_session,
 )
@@ -46,18 +46,29 @@ class TelegramMappingTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ConfigurationError):
                 parse_chats(value)
 
+    def test_cross_chat_reply_is_not_mapped_to_a_local_message(self):
+        raw = raw_message()
+        raw.sender_id = 77
+        raw.reply_to_msg_id = 99
+        raw.reply_to = SimpleNamespace(reply_to_peer_id=types.PeerUser(43))
+        self.assertIsNone(project_message(raw).reply_to_id)
+        raw.reply_to.reply_to_peer_id = types.PeerUser(42)
+        self.assertEqual(project_message(raw).reply_to_id, 99)
+
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_click_sends_exact_callback_data(self):
         client = AsyncMock()
         client.get_messages.return_value = raw_message()
+        client.return_value = SimpleNamespace(message="Ответ бота")
         adapter = TelegramAdapter(client, {42: "entity"}, Settings("подарок", "Забрать", 0, 0))
         message = await adapter.fetch((42, 12))
-        await adapter.click(message, "забрать")
+        response = await adapter.click(message, "забрать")
         request = client.call_args.args[0]
         self.assertIsInstance(request, functions.messages.GetBotCallbackAnswerRequest)
         self.assertEqual((request.peer, request.msg_id, request.data), ("entity", 12, b"claim"))
         self.assertEqual(client.await_count, 1)
+        self.assertEqual(response.text, "Ответ бота")
 
     async def test_changed_word_or_url_never_sends_callback(self):
         for latest in (None, raw_message(text="условие исчезло"), raw_message(with_callback=False)):
@@ -80,6 +91,40 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConfigurationError):
             await adapter.click(Message(42, 12, "подарок", ("Забрать",)), "Забрать")
         client.assert_not_awaited()
+
+    async def test_terminal_text_discovered_before_callback_does_not_click(self):
+        client = AsyncMock()
+        client.get_messages.return_value = raw_message(text="Уже получил другой", with_callback=False)
+        settings = Settings("подарок", "Забрать", 1, 2, repeat_until_result=True,
+                            mine_phrases="Получено вами", other_phrases="Уже получил другой")
+        adapter = TelegramAdapter(client, {42: "entity"}, settings)
+        response = await adapter.click(Message(42, 12, "подарок", ("Забрать",)), "Забрать")
+        self.assertEqual(response.text, "Уже получил другой")
+        client.assert_not_awaited()
+
+    async def test_flood_wait_pauses_all_chats_before_more_requests(self):
+        client = AsyncMock()
+        client.get_messages.return_value = raw_message()
+        client.side_effect = errors.FloodWaitError(request=None, capture=4)
+        adapter = TelegramAdapter(client, {42: "first", 43: "second"}, Settings("подарок", "Забрать", 1, 2))
+        with patch("ayuclicker.telegram.time.monotonic", return_value=100):
+            with self.assertRaises(RetryLater) as first:
+                await adapter.click(Message(42, 12, "подарок", ("Забрать",)), "Забрать")
+            self.assertEqual(first.exception.seconds, 4)
+            with self.assertRaises(RetryLater) as blocked:
+                await adapter.fetch((43, 12))
+            self.assertEqual(blocked.exception.seconds, 4)
+        self.assertEqual(client.get_messages.await_count, 1)
+        self.assertEqual(client.await_count, 1)
+
+    async def test_callback_timeout_becomes_a_retryable_unknown_result(self):
+        client = AsyncMock()
+        client.get_messages.return_value = raw_message()
+        client.side_effect = TimeoutError()
+        adapter = TelegramAdapter(client, {42: "entity"}, Settings("подарок", "Забрать", 1, 2))
+        with self.assertRaises(RetryLater) as error:
+            await adapter.click(Message(42, 12, "подарок", ("Забрать",)), "Забрать")
+        self.assertEqual(error.exception.reason, "TimeoutError")
 
 
 class FakeClient:
@@ -116,6 +161,7 @@ class FakeClient:
 
     async def __call__(self, request):
         self.clicked.append(request)
+        return SimpleNamespace(message=None)
 
 
 CHAT_A = -1000000000111

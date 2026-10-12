@@ -1,5 +1,6 @@
 from pathlib import Path
 import tempfile
+import sqlite3
 import unittest
 
 from ayuclicker.storage import SqliteAttempts, load_config, save_config
@@ -33,3 +34,25 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(load_config(directory), {})
             (directory / "settings.json").write_text("invalid", encoding="utf-8")
             self.assertEqual(load_config(directory), {})
+
+    def test_old_attempt_database_is_preserved_and_outcomes_are_account_scoped(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "attempts.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.execute("CREATE TABLE attempts (account INTEGER, chat INTEGER, message INTEGER, PRIMARY KEY(account,chat,message))")
+            connection.execute("INSERT INTO attempts VALUES (1, 5, 10)")
+            connection.commit()
+            connection.close()
+            store = SqliteAttempts(path, 1)
+            self.assertTrue(store.contains((5, 10)))
+            self.assertTrue(store.claim((5, 11)))
+            store.complete((5, 11), "mine")
+            values = store.connection.execute("SELECT message, outcome FROM attempts ORDER BY message").fetchall()
+            self.assertEqual(values, [(10, "legacy_once"), (11, "mine")])
+            store.close()
+            another = SqliteAttempts(path, 2)
+            another.claim((5, 11))
+            another.complete((5, 11), "other")
+            outcomes = another.connection.execute("SELECT account, outcome FROM attempts WHERE message=11 ORDER BY account").fetchall()
+            self.assertEqual(outcomes, [(1, "mine"), (2, "other")])
+            another.close()
