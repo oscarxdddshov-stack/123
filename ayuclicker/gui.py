@@ -14,7 +14,7 @@ from .core import Settings
 from .editing import LoginDialog, install_editing, paste_from_clipboard
 from .result_dialog import ResultDialog
 from .storage import data_directory, load_config, save_config
-from .telegram import ConfigurationError, UserCancelled, explain_error, parse_chats, run_session
+from .telegram import ConfigurationError, UserCancelled, explain_error, parse_chat, parse_chats, run_session
 
 
 class Worker:
@@ -92,7 +92,8 @@ class App:
         self.entries = {}
         self.paste_buttons = {}
         self.variables["mine_phrases"] = tk.StringVar(value=str(self.config.get("mine_phrases", "")))
-        self.variables["other_phrases"] = tk.StringVar(value=str(self.config.get("other_phrases", "")))
+        self.variables["other_phrases"] = tk.StringVar(value=str(self.config.get("other_phrases", "уже взял заявку")))
+        self.variables["success_chat"] = tk.StringVar(value=str(self.config.get("success_chat", "")))
         self.repeat_until_result = tk.BooleanVar(value=bool(self.config.get("repeat_until_result", False)))
         root.title("AyuClicker — кнопки по условию")
         root.geometry("780x740")
@@ -218,10 +219,12 @@ class App:
         self.events.put(event)
 
     def configure_results(self):
-        dialog = ResultDialog(self.root, self.variables["mine_phrases"].get(), self.variables["other_phrases"].get())
+        dialog = ResultDialog(self.root, self.variables["mine_phrases"].get(), self.variables["other_phrases"].get(),
+                              self.variables["success_chat"].get(), self.chat_ids)
         if dialog.result is not None:
             self.variables["mine_phrases"].set(dialog.result[0])
             self.variables["other_phrases"].set(dialog.result[1])
+            self.variables["success_chat"].set(dialog.result[2])
             self.repeat_until_result.set(True)
 
     def _chat_modified(self, event=None):
@@ -296,6 +299,8 @@ class App:
             settings = None
             if not list_only:
                 parse_chats(chat)
+                if self.repeat_until_result.get() and values["success_chat"]:
+                    parse_chat(values["success_chat"])
                 try:
                     low = float(values["minimum"].replace(",", "."))
                     high = float(values["maximum"].replace(",", "."))
@@ -303,7 +308,8 @@ class App:
                     raise ValueError("Задержки нужно указать числами в секундах.") from error
                 settings = Settings(values["word"], values["button"], low, high, self.whole_word.get(),
                                     repeat_until_result=self.repeat_until_result.get(),
-                                    mine_phrases=values["mine_phrases"], other_phrases=values["other_phrases"])
+                                    mine_phrases=values["mine_phrases"], other_phrases=values["other_phrases"],
+                                    success_chat=values["success_chat"])
             config = {
                 **values, "chat": chat, "whole_word": self.whole_word.get(),
                 "repeat_until_result": self.repeat_until_result.get(),

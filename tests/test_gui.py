@@ -163,7 +163,7 @@ class GuiTests(unittest.TestCase):
 
     def test_result_configuration_enables_repeat_and_is_passed_to_worker(self):
         with patch("ayuclicker.gui.ResultDialog") as dialog:
-            dialog.return_value.result = ("Получено вами", "Уже получил другой")
+            dialog.return_value.result = ("Получено вами", "Уже получил другой", "")
             self.app.configure_results()
         self.assertTrue(self.app.repeat_until_result.get())
         for name, value in {"api_id": "123", "api_hash": "a" * 32, "chat": "42",
@@ -187,3 +187,32 @@ class GuiTests(unittest.TestCase):
             self.app.start()
             constructor.assert_not_called()
             self.assertIn("Забрал я", error.call_args.args[1])
+
+    def test_receipt_bot_configuration_allows_empty_mine_phrase_and_is_saved(self):
+        self.app.chat_ids = {"Бот [99]": 99}
+        with patch("ayuclicker.gui.ResultDialog") as dialog:
+            dialog.return_value.result = ("", "уже взял заявку", "99")
+            self.app.configure_results()
+            self.assertEqual(dialog.call_args.args[-1], {"Бот [99]": 99})
+        for name, value in {"api_id": "123", "api_hash": "a" * 32, "chat": "-100123",
+                            "word": "подарок", "button": "Забрать"}.items():
+            self.app.variables[name].set(value)
+        with patch("ayuclicker.gui.Worker") as constructor:
+            self.app.start()
+            settings = constructor.call_args.args[-1]
+            self.assertEqual(settings.success_chat, "99")
+            self.assertEqual(settings.mine_markers, ())
+        self.assertEqual(load_config(Path(self.temporary.name))["success_chat"], "99")
+
+    def test_result_dialog_can_pick_bot_validate_and_save(self):
+        from ayuclicker.result_dialog import ResultDialog
+
+        def fill():
+            dialog = next(child for child in self.root.winfo_children() if isinstance(child, ResultDialog))
+            dialog.picker.set("Бот [99]")
+            dialog.choose_bot()
+            dialog.ok()
+
+        self.root.after(50, fill)
+        dialog = ResultDialog(self.root, "", "уже взял заявку", "", {"Бот [99]": 99})
+        self.assertEqual(dialog.result, ("", "уже взял заявку", "99"))

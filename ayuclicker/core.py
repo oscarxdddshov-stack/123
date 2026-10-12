@@ -6,8 +6,15 @@ import asyncio
 import math
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
+
+
+def request_tags(text: str) -> tuple[str, str] | None:
+    """The complete trailing request identifier, never a BIN or partial tag."""
+    match = re.search(r"(?<![\w#])#(AD[0-9]+)\s*\[\s*#([A-Za-z][A-Za-z0-9_]*)\s*\]\s*\Z", text)
+    return (match.group(1).casefold(), match.group(2).casefold()) if match else None
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,7 @@ class Settings:
     repeat_until_result: bool = False
     mine_phrases: str = ""
     other_phrases: str = ""
+    success_chat: str = ""
     terms: tuple[str, ...] = field(init=False, repr=False)
     rules: tuple[TextRule, ...] = field(init=False, repr=False)
     mine_markers: tuple[str, ...] = field(init=False, repr=False)
@@ -72,8 +80,8 @@ class Settings:
         if self.repeat_until_result:
             if self.minimum <= 0:
                 raise ValueError("Для повторных нажатий минимальная задержка должна быть больше нуля.")
-            if not self.mine_markers or not self.other_markers:
-                raise ValueError("Для повторов укажите фразы результата: «Забрал я» и «Забрал другой».")
+            if (not self.mine_markers and not self.success_chat.strip()) or not self.other_markers:
+                raise ValueError("Для повторов укажите «Забрал я» или диалог подтверждения по тегам, а также «Забрал другой».")
             if set(self.mine_markers) & set(self.other_markers):
                 raise ValueError("Фразы «Забрал я» и «Забрал другой» должны отличаться.")
 
@@ -100,6 +108,7 @@ class Message:
     buttons: tuple[str, ...]
     sender_id: int | None = None
     reply_to_id: int | None = None
+    timestamp: float | None = None
 
     @property
     def key(self) -> tuple[int, int]:
@@ -122,7 +131,7 @@ class RetryLater(Exception):
 class Adapter(Protocol):
     async def fetch(self, key: tuple[int, int]) -> Message | None: ...
 
-    async def click(self, message: Message, title: str) -> ClickResponse: ...
+    async def click(self, message: Message, title: str, *, before_dispatch=None) -> ClickResponse: ...
 
 
 class AttemptStore(Protocol):
@@ -158,6 +167,9 @@ class Clicker:
         self.uniform = uniform
         self.pending: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.origins: dict[tuple[int, int], int | None] = {}
+        self.receipt_chat_id: int | None = None
+        self.receipts_after: int = 0
+        self.receipt_origins: dict[tuple[int, int], tuple[tuple[str, str], float]] = {}
         self.closed = False
 
     def observe(self, message: Message) -> None:
@@ -187,6 +199,7 @@ class Clicker:
     def remove(self, key: tuple[int, int]) -> None:
         task = self.pending.pop(key, None)
         self.origins.pop(key, None)
+        self.receipt_origins.pop(key, None)
         if task is not None:
             task.cancel()
             self.log(f"{message_label(key)}: ожидающее нажатие отменено.")
@@ -202,6 +215,7 @@ class Clicker:
         self.log(f"{message_label(key)}: {label}. Повторы остановлены.")
         task = self.pending.pop(key)
         self.origins.pop(key, None)
+        self.receipt_origins.pop(key, None)
         if task is not asyncio.current_task():
             task.cancel()
         return True
@@ -215,10 +229,42 @@ class Clicker:
         outcome = self.settings.outcome(message.text)
         return self.confirm(key, outcome) if outcome is not None else False
 
+    def arm_receipt(self, message: Message) -> None:
+        # Called with the last re-read immediately before a real callback request.
+        # Keep the first request time for timeouts and update the actual tags.
+        tags = request_tags(message.text)
+        previous = self.receipt_origins.get(message.key)
+        if tags is not None:
+            started = previous[1] if previous and previous[0] == tags else time.time()
+            self.receipt_origins[message.key] = (tags, started)
+        else:
+            self.receipt_origins.pop(message.key, None)
+
+    def observe_receipt(self, message: Message) -> bool:
+        if self.closed or not self.settings.repeat_until_result or message.chat_id != self.receipt_chat_id:
+            return False
+        # One new incoming message can confirm once; old messages and edits cannot.
+        if message.message_id <= self.receipts_after:
+            return False
+        self.receipts_after = message.message_id
+        if message.sender_id != self.receipt_chat_id:
+            return False
+        tags = request_tags(message.text)
+        if tags is None or self.settings.outcome(message.text) == "other":
+            return False
+        matches = [key for key, (source, started) in self.receipt_origins.items()
+                   if key in self.pending and source == tags
+                   and (message.timestamp is None or message.timestamp >= int(started))]
+        if len(matches) > 1:
+            self.log("Подтверждение по тегам неоднозначно: одинаковая пара у нескольких заявок. Повторы не остановлены.")
+            return False
+        return self.confirm(matches[0], "mine") if matches else False
+
     def _finished(self, key: tuple[int, int], task: asyncio.Task[None]) -> None:
         if self.pending.get(key) is task:
             self.pending.pop(key, None)
             self.origins.pop(key, None)
+            self.receipt_origins.pop(key, None)
         if not task.cancelled() and task.exception() is not None:
             self.log(f"{message_label(key)}: внутренняя ошибка {type(task.exception()).__name__}.")
 
@@ -282,7 +328,10 @@ class Clicker:
                     if not self.attempts.claim(key):
                         return
                     owned = True
-                response = await self.adapter.click(latest, self.settings.button.strip())
+                if self.settings.success_chat.strip():
+                    response = await self.adapter.click(latest, self.settings.button.strip(), before_dispatch=self.arm_receipt)
+                else:
+                    response = await self.adapter.click(latest, self.settings.button.strip())
                 if response is None or response.dispatched:
                     number += 1
                 outcome = self.settings.outcome(response.text if response is not None else "")
@@ -308,6 +357,7 @@ class Clicker:
         tasks = list(self.pending.values())
         self.pending.clear()
         self.origins.clear()
+        self.receipt_origins.clear()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

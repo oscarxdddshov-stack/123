@@ -61,7 +61,9 @@ def project_message(raw) -> Message:
     reply_peer = getattr(getattr(raw, "reply_to", None), "reply_to_peer_id", None)
     if reply_peer is not None and utils.get_peer_id(reply_peer) != raw.chat_id:
         reply_to_id = None
-    return Message(raw.chat_id, raw.id, raw.raw_text or "", buttons, getattr(raw, "sender_id", None), reply_to_id)
+    date = getattr(raw, "date", None)
+    return Message(raw.chat_id, raw.id, raw.raw_text or "", buttons, getattr(raw, "sender_id", None),
+                   reply_to_id, date.timestamp() if date is not None else None)
 
 
 def parse_chat(value: str) -> int | str:
@@ -137,7 +139,7 @@ class TelegramAdapter:
             raise ConfigurationError("Получено сообщение из другого чата. Нажатие отменено.")
         return message
 
-    async def click(self, message: Message, title: str) -> ClickResponse:
+    async def click(self, message: Message, title: str, *, before_dispatch=None) -> ClickResponse:
         # Fetch again before sending the exact callback data, not coordinates.
         entity = self.entity_for(message.chat_id)
         raw = await self.request(lambda: self.client.get_messages(entity, ids=message.message_id))
@@ -160,9 +162,13 @@ class TelegramAdapter:
                     is_callback(button)
                     and button.text.strip().casefold() == title.casefold()
                 ):
-                    response = await self.request(lambda: self.client(functions.messages.GetBotCallbackAnswerRequest(
-                        peer=entity, msg_id=raw.id, data=button.button.type.data,
-                    )))
+                    def dispatch():
+                        if before_dispatch is not None:
+                            before_dispatch(latest)
+                        return self.client(functions.messages.GetBotCallbackAnswerRequest(
+                            peer=entity, msg_id=raw.id, data=button.button.type.data,
+                        ))
+                    response = await self.request(dispatch)
                     return ClickResponse(response.message or "")
         raise ConfigurationError("Кнопка больше недоступна.")
 
@@ -206,6 +212,8 @@ async def run_session(
     prompt: Callable[[str, bool], Awaitable[str]],
 ) -> None:
     targets = parse_chats(chat) if settings is not None else ()
+    receipt_target = (parse_chat(settings.success_chat) if settings is not None
+                      and settings.repeat_until_result and settings.success_chat.strip() else None)
     client = TelegramClient(
         str(directory / "telegram"), api_id, api_hash,
         device_model="AyuClicker", app_version="1.0",
@@ -236,6 +244,8 @@ async def run_session(
 
         # Load the dialog cache once for all numeric IDs, not once per chat.
         remaining_ids = {target for target in targets if isinstance(target, int)}
+        if isinstance(receipt_target, int):
+            remaining_ids.add(receipt_target)
         if remaining_ids:
             async for dialog in client.iter_dialogs():
                 remaining_ids.discard(dialog.id)
@@ -261,6 +271,23 @@ async def run_session(
             log(f"Подготовлен чат {chat_id}.")
         attempts = SqliteAttempts(directory / "attempts.sqlite3", me.id)
         clicker = Clicker(settings, TelegramAdapter(client, entities, settings), attempts, log)
+        receipt_entity = None
+        if receipt_target is not None:
+            try:
+                receipt_entity = await client.get_input_entity(receipt_target)
+                bot = await client.get_entity(receipt_entity)
+                if not isinstance(bot, types.User) or not bot.bot:
+                    raise ConfigurationError("Диалог подтверждения должен быть личным диалогом с ботом.")
+                receipt_id = utils.get_peer_id(receipt_entity)
+                if receipt_id in entities:
+                    raise ConfigurationError("Диалог подтверждения укажите отдельно от чатов с кнопками.")
+                latest = await client.get_messages(receipt_entity, limit=1)
+            except (ValueError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError,
+                    errors.ChannelPrivateError, errors.PeerIdInvalidError) as error:
+                raise ConfigurationError("Диалог подтверждения не найден. Проверьте ID / @username бота и доступ.") from error
+            clicker.receipt_chat_id = receipt_id
+            clicker.receipts_after = latest[0].id if latest else 0
+            log(f"Подтверждение получения: диалог {receipt_id}, совпадение обоих тегов #AD… [#…].")
 
         async def observe(event):
             # Ignore history, including edits of messages predating this run.
@@ -281,10 +308,15 @@ async def run_session(
                     else:
                         clicker.remove(key)
 
+        async def receipt(event):
+            clicker.observe_receipt(project_message(event.message))
+
         selected = list(entities.values())
         client.add_event_handler(observe, events.NewMessage(chats=selected, incoming=True))
         client.add_event_handler(observe, events.MessageEdited(chats=selected, incoming=True))
         client.add_event_handler(deleted, events.MessageDeleted())
+        if receipt_entity is not None:
+            client.add_event_handler(receipt, events.NewMessage(chats=[receipt_entity], incoming=True))
         emit("watching", len(entities))
         log(f"Наблюдение включено: чатов {len(entities)}. Обрабатываются только новые входящие сообщения выбранных чатов.")
         await client.disconnected
