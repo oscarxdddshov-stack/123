@@ -94,8 +94,9 @@ class GuiTests(unittest.TestCase):
         self.app.emit("dialogs", [("Бот", 45), ("Приватная группа", -100123)])
         self.app.emit("log", "Проверка журнала")
         self.app.poll()
-        self.assertEqual(self.app.variables["chat"].get(), "Приватная группа [-100123]")
-        self.assertEqual(self.app.chat_ids[self.app.variables["chat"].get()], -100123)
+        self.assertEqual(self.app.variables["chat"].get(), "-100123")
+        self.assertEqual(self.app.chat_box.get(), "Приватная группа [-100123]")
+        self.assertEqual(self.app.chat_ids[self.app.chat_box.get()], -100123)
         self.assertIn("Проверка журнала", self.app.log_widget.get("1.0", "end"))
 
     def test_invalid_range_does_not_start_worker(self):
@@ -130,3 +131,32 @@ class GuiTests(unittest.TestCase):
             self.assertIn("31", report)
             self.assertIn("Вставить", report)
             self.assertNotIn("b" * 31, report)
+
+    def test_multiple_chat_ids_are_passed_and_saved_without_replacement(self):
+        ids = "-1001111111111\n-1002222222222, -1003333333333"
+        for name, value in {"api_id": "123", "api_hash": "a" * 32, "chat": ids,
+                            "word": "подарок", "button": "Забрать"}.items():
+            self.app.variables[name].set(value)
+        with patch("ayuclicker.gui.Worker") as constructor:
+            self.app.start()
+            self.assertEqual(constructor.call_args.args[4], ids)
+        self.assertEqual(load_config(Path(self.temporary.name))["chat"], ids)
+        self.assertEqual(self.app.chat_text.get("1.0", "end-1c"), ids)
+
+    def test_chat_picker_appends_selected_id_and_ignores_duplicates(self):
+        self.app.variables["chat"].set("-1001111111111")
+        self.app.emit("dialogs", [("Группа", -1002222222222)])
+        self.app.poll()
+        self.app.add_chat_button.invoke()
+        self.app.add_chat_button.invoke()
+        self.assertEqual(self.app.variables["chat"].get(), "-1001111111111\n-1002222222222")
+
+    def test_loading_dialogs_preserves_all_selected_ids(self):
+        ids = "-1001111111111, -1002222222222"
+        self.app.variables["chat"].set(ids)
+        self.app.emit("dialogs", [("Группа", -1002222222222)])
+        self.app.poll()
+        self.assertEqual(self.app.variables["chat"].get(), ids)
+        self.app.emit("watching", 2)
+        self.app.poll()
+        self.assertEqual(self.app.status.get(), "Работает: чатов 2")

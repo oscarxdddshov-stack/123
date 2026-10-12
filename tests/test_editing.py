@@ -97,3 +97,15 @@ class ClipboardTests(unittest.TestCase):
         self.root.after(2000, safety_cancel)
         dialog = LoginDialog(self.root, "Код входа:", secret=True)
         self.assertEqual(dialog.result, "12345")
+
+    def test_multiline_text_field_paste_and_select_all(self):
+        field = tk.Text(self.root, height=3)
+        field.pack()
+        editor = install_editing(field)
+        field.insert("1.0", "old list")
+        editor.action("all")
+        self.clipboard("-1001111111111\n-1002222222222")
+        editor.action("paste")
+        self.assertEqual(field.get("1.0", "end-1c"), "-1001111111111\n-1002222222222")
+        field.configure(state="disabled")
+        self.assertFalse(paste_from_clipboard(field, replace_all=True))

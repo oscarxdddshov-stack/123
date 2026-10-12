@@ -13,7 +13,7 @@ import webbrowser
 from .core import Settings
 from .editing import LoginDialog, install_editing, paste_from_clipboard
 from .storage import data_directory, load_config, save_config
-from .telegram import UserCancelled, explain_error, run_session
+from .telegram import ConfigurationError, UserCancelled, explain_error, parse_chats, run_session
 
 
 class Worker:
@@ -91,8 +91,8 @@ class App:
         self.entries = {}
         self.paste_buttons = {}
         root.title("AyuClicker — кнопки по условию")
-        root.geometry("740x680")
-        root.minsize(650, 620)
+        root.geometry("780x740")
+        root.minsize(700, 680)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         self.root.after(100, self.poll)
@@ -117,30 +117,47 @@ class App:
         remember_box.grid(row=5, column=1, sticky="w", pady=(0, 12))
         self.inputs.append(remember_box)
 
-        ttk.Label(frame, text="Чат").grid(row=6, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(frame, text="Чаты (ID)").grid(row=6, column=0, sticky="nw", padx=(0, 12), pady=5)
         self.variables["chat"] = tk.StringVar(value=str(self.config.get("chat", "")))
-        self.chat_box = ttk.Combobox(frame, textvariable=self.variables["chat"])
+        chat_frame = ttk.Frame(frame)
+        chat_frame.grid(row=6, column=1, columnspan=2, sticky="ew", pady=5)
+        self.chat_text = tk.Text(chat_frame, height=3, width=35, wrap="word", undo=True, exportselection=False)
+        self.chat_text.pack(side="left", fill="both", expand=True)
+        chat_scrollbar = ttk.Scrollbar(chat_frame, command=self.chat_text.yview)
+        chat_scrollbar.pack(side="right", fill="y")
+        self.chat_text.configure(yscrollcommand=chat_scrollbar.set)
+        self.chat_text.insert("1.0", self.variables["chat"].get())
+        self.chat_text.edit_modified(False)
+        install_editing(self.chat_text)
+        self.chat_text.bind("<<Modified>>", self._chat_modified)
+        self.variables["chat"].trace_add("write", self._sync_chat_text)
+        self.inputs.append(self.chat_text)
+
+        self.chat_box = ttk.Combobox(frame, state="readonly")
         install_editing(self.chat_box)
-        self.chat_box.grid(row=6, column=1, sticky="ew", pady=5)
+        self.chat_box.grid(row=7, column=1, sticky="ew", pady=5)
         self.inputs.append(self.chat_box)
+        self.add_chat_button = ttk.Button(frame, text="Добавить чат", command=self.add_selected_chat)
+        self.add_chat_button.grid(row=7, column=2, padx=(10, 0), sticky="ew")
+        self.inputs.append(self.add_chat_button)
         self.load_button = ttk.Button(frame, text="Загрузить чаты", command=lambda: self.start(list_only=True))
-        self.load_button.grid(row=6, column=2, padx=(10, 0))
-        ttk.Label(frame, text="Выберите чат из списка либо введите @username или ID.", wraplength=440).grid(
-            row=7, column=1, columnspan=2, sticky="w", pady=(0, 8)
+        self.load_button.grid(row=8, column=2, padx=(10, 0), sticky="ew")
+        ttk.Label(frame, text="ID через запятую или с новой строки. Можно добавить чаты из списка.", wraplength=420).grid(
+            row=8, column=1, sticky="w", pady=(0, 8)
         )
-        self._entry(frame, 8, "Слова / фразы", "word", "")
-        self._entry(frame, 9, "Название кнопки", "button", "")
+        self._entry(frame, 9, "Слова / фразы", "word", "")
+        self._entry(frame, 10, "Название кнопки", "button", "")
         self.whole_word = tk.BooleanVar(value=bool(self.config.get("whole_word", True)))
         matching = ttk.Frame(frame)
-        matching.grid(row=10, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        matching.grid(row=11, column=1, columnspan=2, sticky="w", pady=(0, 8))
         whole_box = ttk.Checkbutton(matching, text="Искать целые слова / фразы", variable=self.whole_word)
         whole_box.pack(anchor="w")
         ttk.Label(matching, text="Через запятую — любое из слов: BANCORP, Сбер, Альфа", wraplength=490).pack(anchor="w")
         self.inputs.append(whole_box)
 
-        ttk.Label(frame, text="Задержка, сек.").grid(row=11, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(frame, text="Задержка, сек.").grid(row=12, column=0, sticky="w", padx=(0, 12))
         delay = ttk.Frame(frame)
-        delay.grid(row=11, column=1, sticky="w", pady=5)
+        delay.grid(row=12, column=1, sticky="w", pady=5)
         for name, default, label in (("minimum", "2", "от"), ("maximum", "5", "до")):
             ttk.Label(delay, text=label).pack(side="left", padx=(0, 5))
             variable = tk.StringVar(value=str(self.config.get(name, default)))
@@ -151,7 +168,7 @@ class App:
             self.inputs.append(entry)
 
         controls = ttk.Frame(frame)
-        controls.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(14, 10))
+        controls.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(14, 10))
         self.start_button = ttk.Button(controls, text="Старт", command=self.start)
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(controls, text="Стоп", command=self.stop, state="disabled")
@@ -159,10 +176,10 @@ class App:
         self.status = tk.StringVar(value="Остановлено")
         ttk.Label(controls, textvariable=self.status).pack(side="right")
 
-        ttk.Label(frame, text="Журнал действий").grid(row=13, column=0, columnspan=3, sticky="w")
+        ttk.Label(frame, text="Журнал действий").grid(row=14, column=0, columnspan=3, sticky="w")
         log_frame = ttk.Frame(frame)
-        log_frame.grid(row=14, column=0, columnspan=3, sticky="nsew", pady=(5, 0))
-        frame.rowconfigure(14, weight=1)
+        log_frame.grid(row=15, column=0, columnspan=3, sticky="nsew", pady=(5, 0))
+        frame.rowconfigure(15, weight=1)
         self.log_widget = tk.Text(log_frame, height=8, state="disabled", wrap="word", font=("Consolas", 10))
         self.log_widget.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_widget.yview)
@@ -188,6 +205,36 @@ class App:
     def emit(self, *event):
         self.events.put(event)
 
+    def _chat_modified(self, event=None):
+        if self.chat_text.edit_modified():
+            self.variables["chat"].set(self.chat_text.get("1.0", "end-1c"))
+            self.chat_text.edit_modified(False)
+
+    def _sync_chat_text(self, *_):
+        value = self.variables["chat"].get()
+        if self.chat_text.get("1.0", "end-1c") != value:
+            state = str(self.chat_text.cget("state"))
+            self.chat_text.configure(state="normal")
+            self.chat_text.delete("1.0", "end")
+            self.chat_text.insert("1.0", value)
+            self.chat_text.edit_modified(False)
+            self.chat_text.configure(state=state)
+
+    def add_selected_chat(self):
+        target = self.chat_ids.get(self.chat_box.get())
+        if target is None:
+            messagebox.showinfo("Добавить чат", "Загрузите чаты и выберите нужный в списке.", parent=self.root)
+            return
+        current = self.chat_text.get("1.0", "end-1c").strip()
+        try:
+            targets = list(parse_chats(current)) if current else []
+        except ConfigurationError as error:
+            messagebox.showerror("Список чатов", str(error), parent=self.root)
+            return
+        if target not in targets:
+            targets.append(target)
+        self.variables["chat"].set("\n".join(str(item) for item in targets))
+
     def log(self, text):
         self.log_widget.configure(state="normal")
         self.log_widget.insert("end", f"{datetime.now():%H:%M:%S}  {text}\n")
@@ -202,6 +249,8 @@ class App:
         state = "disabled" if value else "normal"
         for widget in self.inputs:
             widget.configure(state=state)
+        if not value:
+            self.chat_box.configure(state="readonly")
         self.start_button.configure(state=state)
         self.load_button.configure(state=state)
         self.stop_button.configure(state="normal" if value else "disabled")
@@ -210,6 +259,7 @@ class App:
         if self.worker is not None:
             return
         try:
+            self.variables["chat"].set(self.chat_text.get("1.0", "end-1c"))
             values = {name: variable.get().strip() for name, variable in self.variables.items()}
             try:
                 api_id = int(values["api_id"])
@@ -223,11 +273,10 @@ class App:
                     f"Сейчас введено символов: {len(values['api_hash'])}.\n"
                     "Скопируйте App api_hash с my.telegram.org и нажмите «Вставить» рядом с API hash."
                 )
-            chat = str(self.chat_ids.get(values["chat"], values["chat"]))
+            chat = values["chat"]
             settings = None
             if not list_only:
-                if not chat:
-                    raise ValueError("Выберите чат. Можно сначала нажать «Загрузить чаты».")
+                parse_chats(chat)
                 try:
                     low = float(values["minimum"].replace(",", "."))
                     high = float(values["maximum"].replace(",", "."))
@@ -240,7 +289,7 @@ class App:
                 "api_hash": values["api_hash"] if self.remember.get() else "",
             }
             save_config(self.directory, config)
-        except (ValueError, OSError) as error:
+        except (ConfigurationError, ValueError, OSError) as error:
             messagebox.showerror("Проверьте настройки", str(error), parent=self.root)
             return
         self.busy(True)
@@ -267,19 +316,25 @@ class App:
                 if not self.closing:
                     messagebox.showerror("AyuClicker", args[0], parent=self.root)
             elif kind == "watching":
-                self.status.set("Работает")
+                self.status.set(f"Работает: чатов {args[0]}" if args else "Работает")
             elif kind == "finished":
                 self.worker = None
                 self.busy(False)
                 self.status.set("Остановлено")
             elif kind == "dialogs":
-                current = str(self.chat_ids.get(self.variables["chat"].get(), self.variables["chat"].get()))
                 self.chat_ids = {f"{name} [{identifier}]": identifier for name, identifier in args[0]}
                 self.chat_box.configure(values=list(self.chat_ids))
+                try:
+                    targets = parse_chats(self.variables["chat"].get())
+                except ConfigurationError:
+                    targets = ()
                 for label, identifier in self.chat_ids.items():
-                    if str(identifier) == current:
-                        self.variables["chat"].set(label)
+                    if identifier in targets:
+                        self.chat_box.set(label)
                         break
+                else:
+                    if self.chat_ids:
+                        self.chat_box.set(next(iter(self.chat_ids)))
             elif kind == "prompt":
                 text, secret, future = args
                 if future.done():

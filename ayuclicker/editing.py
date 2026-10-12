@@ -32,6 +32,10 @@ def is_editable(widget):
     ))
 
 
+def selection_present(widget):
+    return bool(widget.tag_ranges("sel")) if isinstance(widget, tk.Text) else widget.selection_present()
+
+
 def paste_from_clipboard(widget, *, replace_all=False):
     if not is_editable(widget):
         return False
@@ -42,6 +46,19 @@ def paste_from_clipboard(widget, *, replace_all=False):
         return False
     if not value:
         return False
+    if isinstance(widget, tk.Text):
+        if replace_all:
+            widget.delete("1.0", "end")
+            widget.mark_set("insert", "1.0")
+        elif selection_present(widget):
+            first = widget.index("sel.first")
+            widget.delete("sel.first", "sel.last")
+            widget.mark_set("insert", first)
+        widget.insert("insert", value)
+        widget.tag_remove("sel", "1.0", "end")
+        widget.see("insert")
+        widget.focus_set()
+        return True
     if replace_all:
         widget.delete(0, "end")
         position = 0
@@ -76,8 +93,12 @@ class EntryEditing:
         if action == "paste":
             paste_from_clipboard(self.widget)
         elif action == "all":
-            self.widget.selection_range(0, "end")
-            self.widget.icursor("end")
+            if isinstance(self.widget, tk.Text):
+                self.widget.tag_add("sel", "1.0", "end-1c")
+                self.widget.mark_set("insert", "end-1c")
+            else:
+                self.widget.selection_range(0, "end")
+                self.widget.icursor("end")
         elif action == "copy":
             self.widget.event_generate("<<Copy>>")
         elif action == "cut" and is_editable(self.widget):
@@ -90,7 +111,7 @@ class EntryEditing:
             return self.action(action)
 
     def popup(self, event):
-        selected = self.widget.selection_present()
+        selected = selection_present(self.widget)
         editable = is_editable(self.widget)
         self.menu.entryconfigure(0, state="normal" if selected and editable else "disabled")
         self.menu.entryconfigure(1, state="normal" if selected else "disabled")

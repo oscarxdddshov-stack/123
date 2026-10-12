@@ -66,6 +66,10 @@ class AttemptStore(Protocol):
     def claim(self, key: tuple[int, int]) -> bool: ...
 
 
+def message_label(key: tuple[int, int]) -> str:
+    return f"Чат {key[0]}, сообщение {key[1]}"
+
+
 class Clicker:
     """One pending timer and at most one click attempt per message.
 
@@ -102,7 +106,7 @@ class Clicker:
         if key in self.pending:
             return
         delay = self.uniform(self.settings.minimum, self.settings.maximum)
-        self.log(f"Сообщение {message.message_id}: нажатие через {delay:.2f} с.")
+        self.log(f"{message_label(key)}: нажатие через {delay:.2f} с.")
         task = asyncio.create_task(self._run(key, delay))
         self.pending[key] = task
         task.add_done_callback(lambda done: self._finished(key, done))
@@ -111,31 +115,31 @@ class Clicker:
         task = self.pending.pop(key, None)
         if task is not None:
             task.cancel()
-            self.log(f"Сообщение {key[1]}: ожидающее нажатие отменено.")
+            self.log(f"{message_label(key)}: ожидающее нажатие отменено.")
 
     def _finished(self, key: tuple[int, int], task: asyncio.Task[None]) -> None:
         if self.pending.get(key) is task:
             self.pending.pop(key, None)
         if not task.cancelled() and task.exception() is not None:
-            self.log(f"Сообщение {key[1]}: внутренняя ошибка {type(task.exception()).__name__}.")
+            self.log(f"{message_label(key)}: внутренняя ошибка {type(task.exception()).__name__}.")
 
     async def _run(self, key: tuple[int, int], delay: float) -> None:
         try:
             await self.sleep(delay)
             latest = await self.adapter.fetch(key)
             if latest is None or not self.settings.matches(latest):
-                self.log(f"Сообщение {key[1]}: условие больше не выполнено.")
+                self.log(f"{message_label(key)}: условие больше не выполнено.")
                 return
             if self.closed or not self.attempts.claim(key):
                 return
             await self.adapter.click(latest, self.settings.button.strip())
-            self.log(f"Сообщение {key[1]}: кнопка нажата.")
+            self.log(f"{message_label(key)}: кнопка нажата.")
         except asyncio.CancelledError:
             raise
         except Exception as error:
             # Do not log exception text: library errors can contain credentials.
             self.log(
-                f"Сообщение {key[1]}: ошибка {type(error).__name__}. "
+                f"{message_label(key)}: ошибка {type(error).__name__}. "
                 "Повторное нажатие автоматически не выполняется."
             )
 

@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+import re
 from typing import Awaitable, Callable
 
 from telethon import TelegramClient, errors, events, functions, types, utils
@@ -62,7 +63,9 @@ def parse_chat(value: str) -> int | str:
     value = value.strip()
     if not value:
         raise ConfigurationError("Выберите чат или введите его @username / числовой ID.")
-    if value.lstrip("-").isdigit():
+    if re.fullmatch(r"-?[0-9]+", value):
+        if int(value) == 0:
+            raise ConfigurationError("ID чата не может быть равен нулю.")
         return int(value)
     for prefix in ("https://t.me/", "http://t.me/", "t.me/"):
         if value.startswith(prefix):
@@ -76,23 +79,51 @@ def parse_chat(value: str) -> int | str:
     return username
 
 
+def parse_chats(value: str) -> tuple[int | str, ...]:
+    targets = []
+    seen = set()
+    for item in re.split(r"[,;\r\n]+", value):
+        if not item.strip():
+            continue
+        target = parse_chat(item)
+        identity = target.casefold() if isinstance(target, str) else target
+        if identity not in seen:
+            targets.append(target)
+            seen.add(identity)
+    if not targets:
+        raise ConfigurationError("Укажите хотя бы один ID чата. Несколько ID — через запятую или с новой строки.")
+    return tuple(targets)
+
+
 class TelegramAdapter:
-    def __init__(self, client: TelegramClient, entity, settings: Settings):
+    def __init__(self, client: TelegramClient, entities: dict[int, object], settings: Settings):
         self.client = client
-        self.entity = entity
+        self.entities = dict(entities)
         self.settings = settings
 
+    def entity_for(self, chat_id):
+        try:
+            return self.entities[chat_id]
+        except KeyError as error:
+            raise ConfigurationError("Этот чат не включён в список наблюдения.") from error
+
     async def fetch(self, key: tuple[int, int]) -> Message | None:
-        raw = await self.client.get_messages(self.entity, ids=key[1])
+        raw = await self.client.get_messages(self.entity_for(key[0]), ids=key[1])
         if raw is None or isinstance(raw, types.MessageEmpty):
             return None
-        return project_message(raw)
+        message = project_message(raw)
+        if message.key != key:
+            raise ConfigurationError("Получено сообщение из другого чата. Нажатие отменено.")
+        return message
 
     async def click(self, message: Message, title: str) -> None:
         # Fetch again before sending the exact callback data, not coordinates.
-        raw = await self.client.get_messages(self.entity, ids=message.message_id)
+        entity = self.entity_for(message.chat_id)
+        raw = await self.client.get_messages(entity, ids=message.message_id)
         if raw is None or isinstance(raw, types.MessageEmpty) or not self.settings.matches(project_message(raw)):
             raise ConfigurationError("Сообщение изменилось перед нажатием.")
+        if project_message(raw).key != message.key:
+            raise ConfigurationError("Получено сообщение из другого чата. Нажатие отменено.")
         for row in raw.buttons or []:
             for button in row:
                 if (
@@ -100,7 +131,7 @@ class TelegramAdapter:
                     and button.text.strip().casefold() == title.casefold()
                 ):
                     await self.client(functions.messages.GetBotCallbackAnswerRequest(
-                        peer=self.entity, msg_id=raw.id, data=button.button.type.data,
+                        peer=entity, msg_id=raw.id, data=button.button.type.data,
                     ))
                     return
         raise ConfigurationError("Кнопка больше недоступна.")
@@ -144,6 +175,7 @@ async def run_session(
     emit: Callable[..., None],
     prompt: Callable[[str, bool], Awaitable[str]],
 ) -> None:
+    targets = parse_chats(chat) if settings is not None else ()
     client = TelegramClient(
         str(directory / "telegram"), api_id, api_hash,
         device_model="AyuClicker", app_version="1.0",
@@ -171,39 +203,53 @@ async def run_session(
             log(f"Загружено чатов: {len(dialogs)}.")
             return
 
-        # Populate the entity cache, including private chats specified by ID.
-        target = parse_chat(chat)
-        if isinstance(target, int):
+        # Load the dialog cache once for all numeric IDs, not once per chat.
+        remaining_ids = {target for target in targets if isinstance(target, int)}
+        if remaining_ids:
             async for dialog in client.iter_dialogs():
-                if dialog.id == target:
+                remaining_ids.discard(dialog.id)
+                if not remaining_ids:
                     break
-        try:
-            entity = await client.get_input_entity(target)
-        except ValueError as error:
-            raise ConfigurationError("Чат не найден. Загрузите список чатов и выберите нужный.") from error
-        chat_id = utils.get_peer_id(entity)
-        latest = await client.get_messages(entity, limit=1)
-        baseline = latest[0].id if latest else 0
+        entities = {}
+        baselines = {}
+        for target in targets:
+            try:
+                entity = await client.get_input_entity(target)
+                chat_id = utils.get_peer_id(entity)
+                if chat_id in entities:
+                    continue  # ID and username may name the same chat.
+                latest = await client.get_messages(entity, limit=1)
+            except (ValueError, errors.UsernameInvalidError, errors.UsernameNotOccupiedError,
+                    errors.ChannelPrivateError, errors.PeerIdInvalidError) as error:
+                raise ConfigurationError(
+                    f"Чат {target} не найден или недоступен этому аккаунту. "
+                    "Проверьте ID и доступ; можно загрузить список чатов. Наблюдение не включено."
+                ) from error
+            entities[chat_id] = entity
+            baselines[chat_id] = latest[0].id if latest else 0
+            log(f"Подготовлен чат {chat_id}.")
         attempts = SqliteAttempts(directory / "attempts.sqlite3", me.id)
-        clicker = Clicker(settings, TelegramAdapter(client, entity, settings), attempts, log)
+        clicker = Clicker(settings, TelegramAdapter(client, entities, settings), attempts, log)
 
         async def observe(event):
             # Ignore history, including edits of messages predating this run.
-            if event.message.id > baseline:
+            chat_id = event.message.chat_id
+            if chat_id in baselines and event.message.id > baselines[chat_id]:
                 clicker.observe(project_message(event.message))
 
         async def deleted(event):
             # Private-chat deletions sometimes have no chat ID. Refetch remains
             # the authoritative check; do not cancel another chat's message.
-            if event.chat_id == chat_id:
+            if event.chat_id in entities:
                 for message_id in event.deleted_ids:
-                    clicker.remove((chat_id, message_id))
+                    clicker.remove((event.chat_id, message_id))
 
-        client.add_event_handler(observe, events.NewMessage(chats=entity, incoming=True))
-        client.add_event_handler(observe, events.MessageEdited(chats=entity, incoming=True))
+        selected = list(entities.values())
+        client.add_event_handler(observe, events.NewMessage(chats=selected, incoming=True))
+        client.add_event_handler(observe, events.MessageEdited(chats=selected, incoming=True))
         client.add_event_handler(deleted, events.MessageDeleted())
-        emit("watching")
-        log("Наблюдение включено. Обрабатываются только новые входящие сообщения выбранного чата.")
+        emit("watching", len(entities))
+        log(f"Наблюдение включено: чатов {len(entities)}. Обрабатываются только новые входящие сообщения выбранных чатов.")
         await client.disconnected
         raise ConnectionError()
     finally:
