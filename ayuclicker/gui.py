@@ -189,11 +189,17 @@ class App:
         self.status = tk.StringVar(value="Остановлено")
         ttk.Label(controls, textvariable=self.status).pack(side="right")
 
-        ttk.Label(frame, text="Журнал действий").grid(row=15, column=0, columnspan=3, sticky="w")
+        log_heading = ttk.Frame(frame)
+        log_heading.grid(row=15, column=0, columnspan=3, sticky="ew")
+        ttk.Label(log_heading, text="Журнал действий").pack(side="left")
+        self.copy_log_button = ttk.Button(log_heading, text="Копировать журнал", command=self.copy_log)
+        self.copy_log_button.pack(side="right")
         log_frame = ttk.Frame(frame)
         log_frame.grid(row=16, column=0, columnspan=3, sticky="nsew", pady=(5, 0))
         frame.rowconfigure(16, weight=1)
-        self.log_widget = tk.Text(log_frame, height=8, state="disabled", wrap="word", font=("Consolas", 10))
+        self.log_widget = tk.Text(log_frame, height=8, state="disabled", wrap="word", font=("Consolas", 10),
+                                  exportselection=False, takefocus=True)
+        install_editing(self.log_widget)
         self.log_widget.pack(side="left", fill="both", expand=True)
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_widget.yview)
         scrollbar.pack(side="right", fill="y")
@@ -266,6 +272,12 @@ class App:
             self.log_widget.delete("1.0", f"{lines - 500}.0")
         self.log_widget.see("end")
         self.log_widget.configure(state="disabled")
+
+    def copy_log(self):
+        text = self.log_widget.get("1.0", "end-1c")
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
 
     def busy(self, value):
         state = "disabled" if value else "normal"

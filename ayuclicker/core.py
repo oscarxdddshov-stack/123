@@ -11,9 +11,17 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
 
+REQUEST_TAGS = re.compile(r"(?<![\w#])#(AD[0-9]+)\s*\[\s*#([A-Za-z][A-Za-z0-9_]*)\s*\]\s*\Z")
+
+
+def request_tag_label(text: str) -> str:
+    match = REQUEST_TAGS.search(text)
+    return f"#{match.group(1)} [#{match.group(2)}]" if match else ""
+
+
 def request_tags(text: str) -> tuple[str, str] | None:
     """The complete trailing request identifier, never a BIN or partial tag."""
-    match = re.search(r"(?<![\w#])#(AD[0-9]+)\s*\[\s*#([A-Za-z][A-Za-z0-9_]*)\s*\]\s*\Z", text)
+    match = REQUEST_TAGS.search(text)
     return (match.group(1).casefold(), match.group(2).casefold()) if match else None
 
 
@@ -167,6 +175,7 @@ class Clicker:
         self.uniform = uniform
         self.pending: dict[tuple[int, int], asyncio.Task[None]] = {}
         self.origins: dict[tuple[int, int], int | None] = {}
+        self.request_labels: dict[tuple[int, int], str] = {}
         self.receipt_chat_id: int | None = None
         self.receipts_after: int = 0
         self.receipt_origins: dict[tuple[int, int], tuple[tuple[str, str], float]] = {}
@@ -175,6 +184,8 @@ class Clicker:
     def observe(self, message: Message) -> None:
         key = message.key
         if self.settings.repeat_until_result and key in self.pending:
+            if self.settings.matches(message):
+                self.request_labels[key] = request_tag_label(message.text)
             outcome = self.settings.outcome(message.text)
             if outcome is not None:
                 self.confirm(key, outcome)
@@ -194,17 +205,19 @@ class Clicker:
         task = asyncio.create_task(self._repeat(key, delay) if self.settings.repeat_until_result else self._run(key, delay))
         self.pending[key] = task
         self.origins[key] = message.sender_id
+        self.request_labels[key] = request_tag_label(message.text)
         task.add_done_callback(lambda done: self._finished(key, done))
 
     def remove(self, key: tuple[int, int]) -> None:
         task = self.pending.pop(key, None)
         self.origins.pop(key, None)
+        self.request_labels.pop(key, None)
         self.receipt_origins.pop(key, None)
         if task is not None:
             task.cancel()
             self.log(f"{message_label(key)}: ожидающее нажатие отменено.")
 
-    def confirm(self, key: tuple[int, int], outcome: str) -> bool:
+    def confirm(self, key: tuple[int, int], outcome: str, tag_label: str = "") -> bool:
         if outcome not in ("mine", "other") or key not in self.pending:
             return False
         if not self.attempts.contains(key):
@@ -212,9 +225,12 @@ class Clicker:
                 return False
         self.attempts.complete(key, outcome)
         label = "подтверждено: забрал я" if outcome == "mine" else "подтверждено: забрал другой"
-        self.log(f"{message_label(key)}: {label}. Повторы остановлены.")
+        tags = tag_label or self.request_labels.get(key, "")
+        detail = f" — {tags}" if tags else ""
+        self.log(f"{message_label(key)}: {label}{detail}. Повторы остановлены.")
         task = self.pending.pop(key)
         self.origins.pop(key, None)
+        self.request_labels.pop(key, None)
         self.receipt_origins.pop(key, None)
         if task is not asyncio.current_task():
             task.cancel()
@@ -233,6 +249,7 @@ class Clicker:
         # Called with the last re-read immediately before a real callback request.
         # Keep the first request time for timeouts and update the actual tags.
         tags = request_tags(message.text)
+        self.request_labels[message.key] = request_tag_label(message.text)
         previous = self.receipt_origins.get(message.key)
         if tags is not None:
             started = previous[1] if previous and previous[0] == tags else time.time()
@@ -258,12 +275,13 @@ class Clicker:
         if len(matches) > 1:
             self.log("Подтверждение по тегам неоднозначно: одинаковая пара у нескольких заявок. Повторы не остановлены.")
             return False
-        return self.confirm(matches[0], "mine") if matches else False
+        return self.confirm(matches[0], "mine", request_tag_label(message.text)) if matches else False
 
     def _finished(self, key: tuple[int, int], task: asyncio.Task[None]) -> None:
         if self.pending.get(key) is task:
             self.pending.pop(key, None)
             self.origins.pop(key, None)
+            self.request_labels.pop(key, None)
             self.receipt_origins.pop(key, None)
         if not task.cancelled() and task.exception() is not None:
             self.log(f"{message_label(key)}: внутренняя ошибка {type(task.exception()).__name__}.")
@@ -323,6 +341,7 @@ class Clicker:
                     waiting_for_result = True
                     delay = self.uniform(self.settings.minimum, self.settings.maximum)
                     continue
+                self.request_labels[key] = request_tag_label(latest.text)
                 waiting_for_result = False
                 if not owned:
                     if not self.attempts.claim(key):
@@ -357,6 +376,7 @@ class Clicker:
         tasks = list(self.pending.values())
         self.pending.clear()
         self.origins.clear()
+        self.request_labels.clear()
         self.receipt_origins.clear()
         for task in tasks:
             task.cancel()

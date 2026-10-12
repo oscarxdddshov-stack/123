@@ -85,6 +85,7 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.outcomes, {self.source.key: "mine"})
         self.assertEqual(self.clicker.pending, {})
         self.assertEqual(self.clicker.receipt_origins, {})
+        self.assertIn("забрал я — " + TAGS, self.logs[-1])
 
     async def test_wrong_id_name_chat_sender_old_message_or_negative_phrase_never_confirms(self):
         self.arm()
@@ -129,6 +130,8 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.clicker.observe_receipt(self.receipt("#AD398493242 [#ElatedPheasant]")))
         self.assertEqual(self.store.outcomes, {second.key: "mine"})
         self.assertIn(self.source.key, self.clicker.pending)
+        self.assertIn("забрал я — #AD398493242 [#ElatedPheasant]", self.logs[-1])
+        self.assertNotIn(TAGS, self.logs[-1])
 
     async def test_last_refetched_tags_are_used_before_callback_response_arrives(self):
         client = AsyncMock()
@@ -151,6 +154,14 @@ class ReceiptTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*tasks, return_exceptions=True)
         self.assertEqual(self.store.outcomes[self.source.key], "mine")
         self.assertEqual(client.await_count, 1)
+        self.assertIn("#AD398493242 [#ElatedPheasant]", self.logs[-1])
+        self.assertNotIn(TAGS, self.logs[-1])
+
+    async def test_other_claim_reply_retains_original_tags_in_log(self):
+        self.arm()
+        self.assertTrue(self.clicker.observe_reply(Message(123, 2, "Бивер zauron уже взял заявку.", (), 77, 1)))
+        self.assertIn("забрал другой — " + TAGS, self.logs[-1])
+        self.assertEqual(self.store.outcomes[self.source.key], "other")
 
     async def test_no_dispatch_when_condition_changed_cannot_arm_receipt(self):
         client = AsyncMock()

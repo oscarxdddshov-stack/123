@@ -99,6 +99,36 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.app.chat_ids[self.app.chat_box.get()], -100123)
         self.assertIn("Проверка журнала", self.app.log_widget.get("1.0", "end"))
 
+    def test_log_selection_copies_with_shortcut_and_remains_read_only(self):
+        from types import SimpleNamespace
+
+        widget = self.app.log_widget
+        tags = "#AD398493242 [#ElatedPheasant]"
+        self.app.log("подтверждено: забрал я — " + tags)
+        start = widget.search(tags, "1.0")
+        widget.tag_add("sel", start, f"{start}+{len(tags)}c")
+        self.app.log("Наблюдение продолжается.")
+        widget.focus_force()
+        self.root.update()
+        widget.event_generate("<Control-KeyPress-c>")
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), tags)
+        editor = widget._ayuclicker_editor
+        editor.keypress(SimpleNamespace(state=4, keycode=0, keysym="Cyrillic_es"))
+        self.assertEqual(self.root.clipboard_get(), tags)
+        before = widget.get("1.0", "end-1c")
+        editor.action("cut")
+        editor.action("paste")
+        self.assertEqual(widget.get("1.0", "end-1c"), before)
+        self.assertEqual(str(widget.cget("state")), "disabled")
+
+    def test_copy_full_log_button_works_while_running(self):
+        self.app.log("подтверждено: забрал я — #AD398493242 [#ElatedPheasant]")
+        self.app.log("Наблюдение продолжается.")
+        self.app.busy(True)
+        self.app.copy_log_button.invoke()
+        self.assertEqual(self.root.clipboard_get(), self.app.log_widget.get("1.0", "end-1c"))
+
     def test_invalid_range_does_not_start_worker(self):
         values = {"api_id": "123", "api_hash": "a" * 32, "chat": "@test_bot",
                   "word": "подарок", "button": "Забрать", "minimum": "5", "maximum": "2"}
