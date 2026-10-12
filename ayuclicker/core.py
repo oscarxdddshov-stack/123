@@ -6,7 +6,7 @@ import asyncio
 import math
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
 
 
@@ -17,22 +17,26 @@ class Settings:
     minimum: float
     maximum: float
     whole_word: bool = True
+    terms: tuple[str, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.word.strip() or not self.button.strip():
-            raise ValueError("Укажите слово и название кнопки.")
+        terms = tuple(term.strip() for term in self.word.split(",") if term.strip())
+        if not terms or not self.button.strip():
+            raise ValueError("Укажите хотя бы одно слово / фразу и название кнопки.")
+        object.__setattr__(self, "terms", terms)
         if not all(math.isfinite(value) for value in (self.minimum, self.maximum)):
             raise ValueError("Задержки должны быть конечными числами.")
         if not 0 <= self.minimum <= self.maximum:
             raise ValueError("Нужен диапазон: 0 ≤ минимум ≤ максимум секунд.")
 
     def matches(self, message: Message) -> bool:
-        needle = self.word.strip()
         if self.whole_word:
-            pattern = r"(?<!\w)" + re.escape(needle) + r"(?!\w)"
+            alternatives = "|".join(re.escape(term) for term in self.terms)
+            pattern = r"(?<!\w)(?:" + alternatives + r")(?!\w)"
             contains_word = re.search(pattern, message.text, re.IGNORECASE) is not None
         else:
-            contains_word = needle.casefold() in message.text.casefold()
+            text = message.text.casefold()
+            contains_word = any(term.casefold() in text for term in self.terms)
         return contains_word and self.button.strip().casefold() in (
             label.strip().casefold() for label in message.buttons
         )

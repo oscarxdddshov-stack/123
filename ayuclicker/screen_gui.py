@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from .core import Settings
+from .editing import install_editing
 from .screen_core import Reading, Rect, ScreenSchedule, normalize
 from .storage import data_directory
 from .windows_screen import OcrProcess, ScreenError, Stopped, StopHotkey, WindowsDesktop
@@ -171,13 +172,17 @@ class ScreenApp:
         ttk.Label(frame, text="Выберите текст и кнопку ОДНОГО сообщения. Не выделяйте весь чат.\n"
                   "AyuGram должен быть видимым и активным. Остановка — F8.", wraplength=680).grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(5, 16))
-        for row, name, label in ((2, "word", "Слово / фраза"), (3, "button", "Название кнопки")):
+        for row, name, label in ((2, "word", "Слова / фразы"), (3, "button", "Название кнопки")):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12))
             entry = ttk.Entry(frame, textvariable=self.values[name])
+            install_editing(entry)
             entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=5)
             self.inputs.append(entry)
-        checkbox = ttk.Checkbutton(frame, text="Искать целое слово / фразу", variable=self.whole_word)
-        checkbox.grid(row=4, column=1, sticky="w", pady=(0, 10))
+        matching = ttk.Frame(frame)
+        matching.grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 10))
+        checkbox = ttk.Checkbutton(matching, text="Искать целые слова / фразы", variable=self.whole_word)
+        checkbox.pack(anchor="w")
+        ttk.Label(matching, text="Через запятую — любое из слов: BANCORP, Сбер, Альфа", wraplength=480).pack(anchor="w")
         self.inputs.append(checkbox)
 
         ttk.Label(frame, text="Задержка, сек.").grid(row=5, column=0, sticky="w")
@@ -186,6 +191,7 @@ class ScreenApp:
         for name, label in (("minimum", "от"), ("maximum", "до")):
             ttk.Label(delays, text=label).pack(side="left", padx=(0, 5))
             entry = ttk.Entry(delays, width=10, textvariable=self.values[name])
+            install_editing(entry)
             entry.pack(side="left", padx=(0, 15))
             self.inputs.append(entry)
 

@@ -57,6 +57,35 @@ class MatchingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Settings("  ", "кнопка", 0, 1)
 
+    def test_comma_separated_terms_match_any_one(self):
+        settings = Settings(" BANCORP, Сбер, Альфа ", "Забрать", 0, 0)
+        for text in ("Предложение BANCORP", "Найден СБЕР!", "Альфа: новое сообщение"):
+            with self.subTest(text=text):
+                self.assertTrue(settings.matches(msg(text)))
+        self.assertFalse(settings.matches(msg("Другой банк")))
+        self.assertFalse(settings.matches(msg("Сбербанк")))
+        self.assertFalse(settings.matches(msg("BANCORP", buttons=("Другая кнопка",))))
+
+    def test_phrases_and_regex_characters_are_literal_alternatives(self):
+        settings = Settings(" a+b, новый подарок, foo|bar ", "Забрать", 0, 0)
+        for text in ("Есть a+b!", "Получен новый подарок.", "Текст foo|bar"):
+            self.assertTrue(settings.matches(msg(text)))
+        for text in ("aaab", "foo", "подарок"):
+            self.assertFalse(settings.matches(msg(text)))
+
+    def test_empty_list_items_are_ignored_and_empty_list_is_rejected(self):
+        settings = Settings(", , Сбер, ,", "Забрать", 0, 0)
+        self.assertTrue(settings.matches(msg("Сбер")))
+        self.assertFalse(settings.matches(msg("Нет подходящего слова")))
+        with self.assertRaises(ValueError):
+            Settings(", , ,", "Забрать", 0, 0)
+
+    def test_substring_mode_applies_to_each_term(self):
+        settings = Settings("bancorp, сбер", "Забрать", 0, 0, whole_word=False)
+        self.assertTrue(settings.matches(msg("BANCORP123")))
+        self.assertTrue(settings.matches(msg("Сбербанк")))
+        self.assertFalse(settings.matches(msg("Другой банк")))
+
 
 class SchedulingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -135,6 +164,33 @@ class SchedulingTests(unittest.IsolatedAsyncioTestCase):
         await self.finish()
         self.assertEqual(len(self.adapter.clicked), 1)
         self.assertTrue(any("TimeoutError" in line for line in self.logs))
+
+    async def test_changed_message_can_match_another_list_term(self):
+        self.clicker.settings = Settings("подарок, бонус", "Забрать", 2, 5)
+        self.clicker.observe(msg("Получен подарок"))
+        latest = msg("Получен бонус")
+        self.adapter.message = latest
+        self.clicker.observe(latest)
+        await self.finish()
+        self.assertEqual(self.adapter.clicked, [((123, 1), "Забрать")])
+
+    async def test_messages_for_different_terms_each_click_once(self):
+        messages = [msg("BANCORP", message_id=10), msg("Сбер", message_id=11), msg("Другое", message_id=12)]
+
+        class Adapter(FakeAdapter):
+            async def fetch(self, key):
+                return next((message for message in messages if message.key == key), None)
+
+        adapter = Adapter(None)
+        clicker = Clicker(Settings("BANCORP, Сбер", "Забрать", 0, 0), adapter, MemoryStore(), self.logs.append)
+        try:
+            for message in messages:
+                clicker.observe(message)
+                clicker.observe(message)
+            await asyncio.gather(*list(clicker.pending.values()))
+            self.assertEqual(sorted(adapter.clicked), [((123, 10), "Забрать"), ((123, 11), "Забрать")])
+        finally:
+            await clicker.close()
 
 
 if __name__ == "__main__":

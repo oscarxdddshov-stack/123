@@ -107,3 +107,26 @@ class GuiTests(unittest.TestCase):
             self.app.start()
             constructor.assert_not_called()
             error.assert_called_once()
+
+    def test_api_paste_buttons_replace_old_values_and_pass_validation(self):
+        for name, old, pasted in (("api_id", "999", "123"), ("api_hash", "incorrect", "a" * 32)):
+            self.app.variables[name].set(old)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(pasted)
+            self.app.paste_buttons[name].invoke()
+            self.assertEqual(self.app.variables[name].get(), pasted)
+        with patch("ayuclicker.gui.Worker") as constructor, patch("ayuclicker.gui.messagebox.showerror") as error:
+            self.app.start(list_only=True)
+            error.assert_not_called()
+            self.assertEqual(constructor.call_args.args[2:4], (123, "a" * 32))
+
+    def test_invalid_hash_message_reports_length_without_exposing_hash(self):
+        self.app.variables["api_id"].set("123")
+        self.app.variables["api_hash"].set("b" * 31)
+        with patch("ayuclicker.gui.Worker") as constructor, patch("ayuclicker.gui.messagebox.showerror") as error:
+            self.app.start(list_only=True)
+            constructor.assert_not_called()
+            report = error.call_args.args[1]
+            self.assertIn("31", report)
+            self.assertIn("Вставить", report)
+            self.assertNotIn("b" * 31, report)

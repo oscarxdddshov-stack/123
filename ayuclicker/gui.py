@@ -7,10 +7,11 @@ import queue
 import re
 import threading
 import tkinter as tk
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import messagebox, ttk
 import webbrowser
 
 from .core import Settings
+from .editing import LoginDialog, install_editing, paste_from_clipboard
 from .storage import data_directory, load_config, save_config
 from .telegram import UserCancelled, explain_error, run_session
 
@@ -87,6 +88,8 @@ class App:
         self.config = load_config(self.directory)
         self.inputs = []
         self.variables = {}
+        self.entries = {}
+        self.paste_buttons = {}
         root.title("AyuClicker — кнопки по условию")
         root.geometry("740x680")
         root.minsize(650, 620)
@@ -101,7 +104,7 @@ class App:
         ttk.Label(frame, text="AyuClicker", font=("Segoe UI", 20, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w"
         )
-        ttk.Label(frame, text="Нажимает кнопку бота, когда сообщение содержит заданное слово.", wraplength=650).grid(
+        ttk.Label(frame, text="Нажимает кнопку бота, когда сообщение содержит любое из заданных слов.", wraplength=650).grid(
             row=1, column=0, columnspan=3, sticky="w", pady=(0, 18)
         )
         self._entry(frame, 2, "API ID", "api_id", "")
@@ -117,6 +120,7 @@ class App:
         ttk.Label(frame, text="Чат").grid(row=6, column=0, sticky="w", padx=(0, 12))
         self.variables["chat"] = tk.StringVar(value=str(self.config.get("chat", "")))
         self.chat_box = ttk.Combobox(frame, textvariable=self.variables["chat"])
+        install_editing(self.chat_box)
         self.chat_box.grid(row=6, column=1, sticky="ew", pady=5)
         self.inputs.append(self.chat_box)
         self.load_button = ttk.Button(frame, text="Загрузить чаты", command=lambda: self.start(list_only=True))
@@ -124,11 +128,14 @@ class App:
         ttk.Label(frame, text="Выберите чат из списка либо введите @username или ID.", wraplength=440).grid(
             row=7, column=1, columnspan=2, sticky="w", pady=(0, 8)
         )
-        self._entry(frame, 8, "Слово / фраза", "word", "")
+        self._entry(frame, 8, "Слова / фразы", "word", "")
         self._entry(frame, 9, "Название кнопки", "button", "")
         self.whole_word = tk.BooleanVar(value=bool(self.config.get("whole_word", True)))
-        whole_box = ttk.Checkbutton(frame, text="Искать целое слово / фразу", variable=self.whole_word)
-        whole_box.grid(row=10, column=1, sticky="w", pady=(0, 8))
+        matching = ttk.Frame(frame)
+        matching.grid(row=10, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        whole_box = ttk.Checkbutton(matching, text="Искать целые слова / фразы", variable=self.whole_word)
+        whole_box.pack(anchor="w")
+        ttk.Label(matching, text="Через запятую — любое из слов: BANCORP, Сбер, Альфа", wraplength=490).pack(anchor="w")
         self.inputs.append(whole_box)
 
         ttk.Label(frame, text="Задержка, сек.").grid(row=11, column=0, sticky="w", padx=(0, 12))
@@ -139,6 +146,7 @@ class App:
             variable = tk.StringVar(value=str(self.config.get(name, default)))
             self.variables[name] = variable
             entry = ttk.Entry(delay, width=9, textvariable=variable)
+            install_editing(entry)
             entry.pack(side="left", padx=(0, 14))
             self.inputs.append(entry)
 
@@ -166,8 +174,16 @@ class App:
         variable = tk.StringVar(value=str(self.config.get(name, default)))
         self.variables[name] = variable
         entry = ttk.Entry(frame, textvariable=variable, **kwargs)
-        entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=5)
+        self.entries[name] = entry
+        install_editing(entry)
+        credentials = name in ("api_id", "api_hash")
+        entry.grid(row=row, column=1, columnspan=1 if credentials else 2, sticky="ew", pady=5)
         self.inputs.append(entry)
+        if credentials:
+            paste = ttk.Button(frame, text="Вставить", command=lambda: paste_from_clipboard(entry, replace_all=True))
+            paste.grid(row=row, column=2, sticky="ew", padx=(10, 0))
+            self.paste_buttons[name] = paste
+            self.inputs.append(paste)
 
     def emit(self, *event):
         self.events.put(event)
@@ -202,7 +218,11 @@ class App:
             if api_id <= 0:
                 raise ValueError("API ID должен быть положительным целым числом.")
             if re.fullmatch(r"[0-9a-fA-F]{32}", values["api_hash"]) is None:
-                raise ValueError("API hash должен содержать 32 символа с my.telegram.org.")
+                raise ValueError(
+                    "API hash должен содержать ровно 32 символа: цифры 0–9 и буквы a–f.\n"
+                    f"Сейчас введено символов: {len(values['api_hash'])}.\n"
+                    "Скопируйте App api_hash с my.telegram.org и нажмите «Вставить» рядом с API hash."
+                )
             chat = str(self.chat_ids.get(values["chat"], values["chat"]))
             settings = None
             if not list_only:
@@ -267,7 +287,7 @@ class App:
                 if self.closing:
                     future.set_result(None)
                     continue
-                answer = simpledialog.askstring("Вход в Telegram", text, show="•" if secret else "", parent=self.root)
+                answer = LoginDialog(self.root, text, secret).result
                 if not future.done():
                     future.set_result(answer)
         if self.closing and self.worker is None:
