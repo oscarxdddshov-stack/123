@@ -134,6 +134,22 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             await adapter.click(Message(42, 12, "Bancorp /bin 514377", ("Забрать",)), "Забрать")
         client.assert_not_awaited()
 
+    async def test_adapter_accepts_each_bin_from_list_and_rejects_a_changed_unlisted_bin(self):
+        for number in ("497213", "518913", "514377"):
+            with self.subTest(number=number):
+                client = AsyncMock()
+                client.get_messages.return_value = raw_message(text=f"Bancorp /bin {number}")
+                client.return_value = SimpleNamespace(message="")
+                adapter = TelegramAdapter(client, {42: "entity"}, Settings("Bancorp(497213,518913)", "Забрать", 1, 2))
+                message = Message(42, 12, "Bancorp /bin 497213", ("Забрать",))
+                if number == "514377":
+                    with self.assertRaises(ConfigurationError):
+                        await adapter.click(message, "Забрать")
+                    client.assert_not_awaited()
+                else:
+                    await adapter.click(message, "Забрать")
+                    self.assertEqual(client.await_count, 1)
+
 
 class FakeClient:
     def __init__(self):

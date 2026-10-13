@@ -129,9 +129,34 @@ class MatchingTests(unittest.TestCase):
 
     def test_malformed_bin_conditions_are_rejected(self):
         for value in ("Bancorp()", "(514377)", "Bancorp(51O377)", "Bancorp(514377", "Bancorp514377)",
-                      "Bancorp(514377,123456)"):
+                      "Bancorp(,514377)", "Bancorp(514377,)", "Bancorp(514377,,123456)",
+                      "Bancorp((514377))", "Bancorp(514377)(123456)"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 Settings(value, "Забрать", 0, 0)
+
+    def test_bank_matches_any_allowed_bin_in_parentheses(self):
+        settings = Settings("Bancorp(497213,518913)", "Забрать", 0, 0)
+        for number in ("497213", "518913"):
+            self.assertTrue(settings.matches(msg(f"BANCORP\n/bin {number}")))
+        for text in ("Bancorp", "/bin 497213", "Bancorp /bin 514377", "Сбер /bin 518913"):
+            self.assertFalse(settings.matches(msg(text)))
+        self.assertFalse(settings.matches(msg("Bancorp /bin 518913", buttons=("Другая кнопка",))))
+
+    def test_mixed_bank_lists_keep_bin_alternatives_scoped_to_each_bank(self):
+        settings = Settings("Bancorp(497213,518913), SUTTON(403163,514377), GREEN DOT", "Забрать", 0, 0)
+        for text in ("Bancorp /bin 518913", "SUTTON /bin 514377", "GREEN DOT"):
+            self.assertTrue(settings.matches(msg(text)))
+        for text in ("Bancorp /bin 514377", "SUTTON /bin 518913", "SUTTON"):
+            self.assertFalse(settings.matches(msg(text)))
+
+    def test_bin_lists_ignore_spacing_but_require_complete_numbers_in_both_modes(self):
+        for whole_word in (True, False):
+            settings = Settings(", Bancorp ( 497213 , 518913, 497213 ) , , Сбер,", "Забрать", 0, 0, whole_word)
+            self.assertTrue(settings.matches(msg("Bancorp /bin 518913")))
+            self.assertTrue(settings.matches(msg("Сбер")))
+            for number in ("4972130", "1497213", "5189130", "1518913"):
+                with self.subTest(whole_word=whole_word, number=number):
+                    self.assertFalse(settings.matches(msg(f"Bancorp /bin {number}")))
 
 
 class SchedulingTests(unittest.IsolatedAsyncioTestCase):

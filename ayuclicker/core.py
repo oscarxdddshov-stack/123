@@ -28,19 +28,20 @@ def request_tags(text: str) -> tuple[str, str] | None:
 @dataclass(frozen=True)
 class TextRule:
     name: str
-    bin_number: str | None = None
+    bin_numbers: tuple[str, ...] = ()
 
     @classmethod
     def parse(cls, term: str) -> TextRule:
         if "(" not in term and ")" not in term:
             return cls(term)
-        match = re.fullmatch(r"([^()]+?)\s*\(\s*([0-9]+)\s*\)", term)
+        match = re.fullmatch(r"([^()]+?)\s*\(\s*([0-9]+(?:\s*,\s*[0-9]+)*)\s*\)", term)
         if match is None or not match.group(1).strip():
             raise ValueError(
-                "Условие с BIN должно иметь формат Название(цифры), например Bancorp(514377). "
+                "Условие с BIN должно иметь формат Название(цифры), например Bancorp(497213,518913). "
                 "Для названия без BIN не используйте скобки."
             )
-        return cls(match.group(1).strip(), match.group(2))
+        numbers = tuple(dict.fromkeys(number.strip() for number in match.group(2).split(",")))
+        return cls(match.group(1).strip(), numbers)
 
     def matches(self, text: str, whole_word: bool) -> bool:
         if whole_word:
@@ -49,11 +50,37 @@ class TextRule:
             name_matches = self.name.casefold() in text.casefold()
         if not name_matches:
             return False
-        if self.bin_number is None:
+        if not self.bin_numbers:
             return True
         # Match the complete digit sequence even when substring mode is enabled.
         # /bin is an optional label; title and BIN must belong to this message.
-        return re.search(r"(?<!\d)" + re.escape(self.bin_number) + r"(?!\d)", text) is not None
+        return any(re.search(r"(?<!\d)" + re.escape(number) + r"(?!\d)", text) is not None
+                   for number in self.bin_numbers)
+
+
+def split_terms(source: str) -> tuple[str, ...]:
+    """Separate names at top-level commas, keeping each bank's BIN list intact."""
+    terms = []
+    start = 0
+    inside = False
+    for position, character in enumerate(source):
+        if character == "(":
+            if inside:
+                raise ValueError("В условиях BIN нельзя вкладывать скобки друг в друга.")
+            inside = True
+        elif character == ")":
+            if not inside:
+                raise ValueError("В условии BIN лишняя закрывающая скобка.")
+            inside = False
+        elif character == "," and not inside:
+            if term := source[start:position].strip():
+                terms.append(term)
+            start = position + 1
+    if inside:
+        raise ValueError("Закройте скобку в условии BIN, например Bancorp(497213,518913).")
+    if term := source[start:].strip():
+        terms.append(term)
+    return tuple(terms)
 
 
 @dataclass(frozen=True)
@@ -73,7 +100,7 @@ class Settings:
     other_markers: tuple[str, ...] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        terms = tuple(term.strip() for term in self.word.split(",") if term.strip())
+        terms = split_terms(self.word)
         if not terms or not self.button.strip():
             raise ValueError("Укажите хотя бы одно слово / фразу и название кнопки.")
         object.__setattr__(self, "terms", terms)
